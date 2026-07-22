@@ -1,0 +1,15 @@
+# EDB RIS(C) grant claim automation POC — dependencies (PRD §9 stack).
+# Install into the existing venv:  .venv/bin/pip install -r requirements.txt
+# NOTE: openpyxl is already installed in .venv.
+
+openpyxl>=3.1,<4              # xlsx read/write; preserve EDB template formulas (PRD §9)
+pandas>=2.2,<3               # tabular ingest / variance tables
+streamlit>=1.39,<2           # legacy POC upload app (superseded by the React webui)
+fastapi>=0.110,<1            # HTTP API wrapping the deterministic pipeline (webui backend, FR-8)
+uvicorn[standard]>=0.29,<1   # ASGI server for the FastAPI app
+python-multipart>=0.0.9     # multipart form parsing for document uploads
+openai>=1.50,<2              # provider-agnostic OpenAI-compatible client -> vLLM (PRD §7)
+pydantic>=2.7,<3             # typed config + domain models
+pydantic-settings>=2.3,<3   # env-var-overridable settings (config.py)
+sqlite-vec>=0.1.6           # local vector store in the SQLite file (FR-13)
+sentence-transformers>=3.0,<4  # local embeddings, default offline (FR-13/T23)
