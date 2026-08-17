@@ -168,12 +168,19 @@ export interface ChatAnswer {
   used_model: boolean;
   mode: string;
   confidence: number | null;
+  // FR-14: measured groundedness + the plain-language reason when it fails.
+  grounded: boolean;
+  confidence_reason: string | null;
+  unsupported_figures: string[];
 }
 export interface ChatMessage {
   role: "user" | "assistant";
   text: string;
   citations?: EvidenceRef[];
   mode?: string;
+  grounded?: boolean;
+  confidence?: number | null;
+  confidenceReason?: string | null;
 }
 
 // supporting-evidence checklist

@@ -2,3 +2,6 @@
 .claude
 .streamlit
 .pytest_cache
+__pycache__/
+*.pyc
+eval_report.json

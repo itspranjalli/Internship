@@ -14,7 +14,12 @@ export default function Analyzing({
   onReset: () => void;
 }) {
   const endRef = useRef<HTMLDivElement>(null);
-  useEffect(() => endRef.current?.scrollIntoView({ behavior: "smooth" }), [log.length]);
+  // Block body on purpose: a concise arrow would return scrollIntoView()'s value,
+  // which newer Chrome resolves as a Promise. React then treats it as the effect's
+  // cleanup function and throws "destroy is not a function", unmounting the tree.
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [log.length]);
 
   const current = log[log.length - 1];
   const done = error ? log : log.slice(0, -1);

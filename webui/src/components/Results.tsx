@@ -935,3 +935,161 @@ function Pack({ result }: { result: AnalysisResult }) {
     </div>
   );
 }
+
+// ---------------------------------------------------------------------------
+// The guided workflow that unwinds the pipeline one stage at a time.
+// ---------------------------------------------------------------------------
+const STEPS = [
+  { key: "docs", label: "Document check", hint: "FR-2 — what's on file, what's missing" },
+  { key: "eligibility", label: "Eligibility", hint: "FR-6 — who can be claimed, and why not" },
+  { key: "claim", label: "Claim amount", hint: "FR-4 — EDB pro-ration, traced to source" },
+  { key: "grant", label: "Grant & compliance", hint: "ceiling, disbursement gate, audit cadence" },
+  { key: "pack", label: "Submission pack", hint: "FR-5/FR-7 — EDB template, SOE, issues list" },
+] as const;
+
+function Stepper({ step, furthest, onGo }: {
+  step: number; furthest: number; onGo: (i: number) => void;
+}) {
+  return (
+    <ol className="flex flex-wrap items-center gap-x-1 gap-y-2">
+      {STEPS.map((s, i) => {
+        const done = i < step;
+        const here = i === step;
+        const reachable = i <= furthest;
+        return (
+          <Fragment key={s.key}>
+            {i > 0 && <span className="h-px w-4 bg-slate-300" aria-hidden />}
+            <li>
+              <button
+                disabled={!reachable}
+                onClick={() => onGo(i)}
+                title={s.hint}
+                className={
+                  "flex items-center gap-2 rounded-full px-3 py-1.5 text-[13px] font-semibold transition-colors " +
+                  (here
+                    ? "bg-ink text-white"
+                    : reachable
+                      ? "text-slate-600 hover:bg-slate-100"
+                      : "cursor-not-allowed text-slate-300")
+                }
+              >
+                <span
+                  className={
+                    "flex h-5 w-5 items-center justify-center rounded-full text-[11px] " +
+                    (here ? "bg-white/20" : done ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-400")
+                  }
+                >
+                  {done ? <Check width={12} height={12} /> : i + 1}
+                </span>
+                {s.label}
+              </button>
+            </li>
+          </Fragment>
+        );
+      })}
+    </ol>
+  );
+}
+
+/**
+ * The results workflow: Document check → Eligibility → Claim amount → Grant &
+ * compliance → Submission pack, with a step indicator and Back/Continue.
+ *
+ * The document check is a **strict gate**: while a BLOCKER document is missing,
+ * Continue stays disabled until HR either re-uploads it or explicitly accepts
+ * that those people are left out of this claim. That choice is the audit-clean
+ * one — the affected staff are still reported (never silently dropped), they are
+ * simply not claimed.
+ */
+export default function Results({
+  result,
+  advanced,
+  onCite,
+  onReupload,
+}: {
+  result: AnalysisResult;
+  advanced: boolean;
+  onCite: (c: Cite) => void;
+  onReupload: (files: File[]) => void;
+}) {
+  const [step, setStep] = useState(0);
+  const [furthest, setFurthest] = useState(0);
+  const [acknowledged, setAcknowledged] = useState(false);
+
+  const blockers = result.entities.flatMap((e) =>
+    e.cells.filter(
+      (c) => c.status === "missing" && c.severity === "BLOCKER" && !CONDITION_DOCS.has(c.doc_type)
+    )
+  );
+  // A fresh analysis (new session) means new documents — re-arm the gate.
+  useEffect(() => {
+    setAcknowledged(false);
+    setStep(0);
+    setFurthest(0);
+  }, [result.session]);
+
+  const gated = step === 0 && blockers.length > 0 && !acknowledged;
+  const go = (i: number) => {
+    const next = Math.max(0, Math.min(STEPS.length - 1, i));
+    setStep(next);
+    setFurthest((f) => Math.max(f, next));
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  return (
+    <div className="mx-auto max-w-6xl px-4 pb-16 pt-6 sm:px-6">
+      <ResultsSummary result={result} />
+
+      <div className="mt-6 border-y border-slate-200 py-3">
+        <Stepper step={step} furthest={furthest} onGo={go} />
+      </div>
+
+      <div className="mt-6">
+        {step === 0 && <DocCheck result={result} onCite={onCite} onReupload={onReupload} />}
+        {step === 1 && <Eligibility result={result} />}
+        {step === 2 && <Claim result={result} advanced={advanced} onCite={onCite} />}
+        {step === 3 && <GrantCompliance result={result} />}
+        {step === 4 && <Pack result={result} />}
+      </div>
+
+      {gated && (
+        <div className="mt-6 rounded-xl border border-amber-200 bg-amber-50 p-4">
+          <div className="flex items-center gap-2 text-sm font-bold text-amber-800">
+            <Alert width={18} height={18} />
+            {blockers.length} required document(s) still missing
+          </div>
+          <p className="mt-1 text-[13px] text-amber-800/90">
+            Upload the missing documents above to claim these people. If you continue without them,
+            they are <b>excluded from this claim</b> and listed in the issues report — they are never
+            silently dropped.
+          </p>
+          <label className="mt-3 flex items-center gap-2 text-[13px] font-medium text-amber-900">
+            <input
+              type="checkbox"
+              checked={acknowledged}
+              onChange={(e) => setAcknowledged(e.target.checked)}
+              className="h-4 w-4 rounded border-amber-400"
+            />
+            I understand — continue without these documents.
+          </label>
+        </div>
+      )}
+
+      <div className="mt-6 flex items-center justify-between">
+        <button className="btn-ghost" disabled={step === 0} onClick={() => go(step - 1)}>
+          <Chevron width={16} height={16} className="rotate-180" /> Back
+        </button>
+        <span className="text-xs text-slate-400">
+          Step {step + 1} of {STEPS.length} · {STEPS[step].hint}
+        </span>
+        <button
+          className="btn-primary"
+          disabled={gated || step === STEPS.length - 1}
+          onClick={() => go(step + 1)}
+        >
+          Continue <Chevron width={16} height={16} />
+        </button>
+      </div>
+    </div>
+  );
+}

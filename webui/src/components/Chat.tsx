@@ -10,6 +10,59 @@ const SUGGESTIONS = [
   "what is the qualifying salary cap?",
 ];
 
+/**
+ * The assistant emits **bold** around the figures and names it is asserting
+ * (edb_claim/llm/qa.py), so render that one markup rather than printing the
+ * asterisks. Deliberately not a markdown parser: the answer text is data, and
+ * the only thing interpreted here is the emphasis the answer itself sets.
+ */
+function emphasise(text: string) {
+  return text.split(/(\*\*[^*]+\*\*)/g).map((part, i) =>
+    part.startsWith("**") && part.endsWith("**") && part.length > 4 ? (
+      <b key={i} className="font-semibold text-ink">{part.slice(2, -2)}</b>
+    ) : (
+      part
+    )
+  );
+}
+
+/**
+ * FR-14 transparency: every answer shows whether its figures were verified
+ * against the claim rows, and says plainly why when they were not. Nothing is
+ * hidden — an unverified answer is still shown, just marked.
+ */
+function GroundingBadge({
+  grounded,
+  confidence,
+  reason,
+}: {
+  grounded: boolean;
+  confidence?: number | null;
+  reason?: string | null;
+}) {
+  const pct = confidence == null ? null : `${Math.round(confidence * 100)}%`;
+  return (
+    <div className="mt-2 border-t border-slate-200/70 pt-2">
+      <div className="flex items-center gap-1.5 text-[11px] font-medium">
+        <span
+          className={
+            "inline-flex items-center gap-1 rounded-full px-2 py-0.5 " +
+            (grounded
+              ? "bg-emerald-50 text-emerald-700"
+              : "bg-amber-100 text-amber-800")
+          }
+        >
+          {grounded ? "✓ Figures verified" : "⚠ Unverified figure"}
+        </span>
+        {pct && <span className="text-slate-400">confidence {pct}</span>}
+      </div>
+      {reason && (
+        <p className="mt-1 text-[11px] leading-snug text-slate-500">{reason}</p>
+      )}
+    </div>
+  );
+}
+
 export default function Chat({
   session,
   llmEnabled,
@@ -41,7 +94,11 @@ export default function Chat({
   useEffect(() => {
     if (open) setTimeout(() => inputRef.current?.focus(), 80);
   }, [open]);
-  useEffect(() => endRef.current?.scrollIntoView({ behavior: "smooth" }), [messages, sending]);
+  // Block body on purpose — see the note in Analyzing.tsx: a concise arrow returns
+  // scrollIntoView()'s value, which React would try to call as effect cleanup.
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, sending]);
 
   const ask = async (q: string) => {
     const question = q.trim();
@@ -53,7 +110,15 @@ export default function Chat({
       const ans = await sendChat(session, question);
       setMessages((m) => [
         ...m,
-        { role: "assistant", text: ans.text, citations: ans.citations, mode: ans.mode },
+        {
+          role: "assistant",
+          text: ans.text,
+          citations: ans.citations,
+          mode: ans.mode,
+          grounded: ans.grounded,
+          confidence: ans.confidence,
+          confidenceReason: ans.confidence_reason,
+        },
       ]);
     } catch (e: any) {
       setMessages((m) => [
@@ -131,7 +196,14 @@ export default function Chat({
                       : "bg-slate-100 text-slate-700")
                   }
                 >
-                  <div className="whitespace-pre-wrap">{m.text}</div>
+                  <div className="whitespace-pre-wrap">{emphasise(m.text)}</div>
+                  {m.role === "assistant" && m.grounded !== undefined && (
+                    <GroundingBadge
+                      grounded={m.grounded}
+                      confidence={m.confidence}
+                      reason={m.confidenceReason}
+                    />
+                  )}
                   {m.citations && m.citations.length > 0 && (
                     <div className="mt-2 space-y-1 border-t border-slate-200/70 pt-2">
                       {m.citations.slice(0, 12).map((c, ci) => (

@@ -361,6 +361,11 @@ def chat(req: ChatReq) -> JSONResponse:
         "used_model": ans.used_model,
         "mode": ans.mode,
         "confidence": ans.confidence,
+        # FR-14: grounding is measured per answer and its explanation travels with
+        # it, so HR judges every response rather than trusting a black box.
+        "grounded": ans.grounded,
+        "confidence_reason": ans.confidence_reason,
+        "unsupported_figures": ans.unsupported_figures,
     })
 
 

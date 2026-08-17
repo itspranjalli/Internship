@@ -13,3 +13,8 @@ pydantic>=2.7,<3             # typed config + domain models
 pydantic-settings>=2.3,<3   # env-var-overridable settings (config.py)
 sqlite-vec>=0.1.6           # local vector store in the SQLite file (FR-13)
 sentence-transformers>=3.0,<4  # local embeddings, default offline (FR-13/T23)
+pytest>=8.0,<9              # test suite + the FR-14 eval assertions (tests/)
+
+# --- docs/presentation tooling only; not imported by edb_claim/ at runtime ---
+python-pptx>=1.0,<2         # builds docs/demo/*.pptx (build_ppt.py, deck/render_pptx.py)
+pillow>=10.0                # screenshot cropping/embedding for the decks

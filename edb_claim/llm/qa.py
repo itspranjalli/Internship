@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from typing import Any, List, Optional
 
 from edb_claim.config import Config, settings
+from edb_claim.eval.groundedness import allowed_figures, check, derivation_bases
 from edb_claim.llm.client import LLMClient
 
 _ANSWER_SCHEMA = {
@@ -130,11 +131,23 @@ SCHEME_KB = [
 class Answer:
     text: str
     citations: List[dict] = field(default_factory=list)  # {file, sheet, cell, label}
-    grounded: bool = True          # figures came from real rows / KB, not invented
+    # MEASURED, not asserted: every figure in ``text`` was checked against the
+    # retrieved rows/context by edb_claim.eval.groundedness (FR-12/FR-14).
+    grounded: bool = True
     used_model: bool = False       # the offline model phrased the answer
     offline: bool = False          # model endpoint not configured
     confidence: Optional[float] = None
+    # plain-language explanation when grounded is False or confidence is low.
+    # NEVER discarded — FR-14 requires HR to see it alongside the answer.
+    confidence_reason: Optional[str] = None
     mode: str = "scheme"           # data | evidence | scheme
+    unsupported_figures: List[str] = field(default_factory=list)
+
+    # -- grounding provenance, carried per-answer so verification is stateless --
+    # (the assistant is shared across concurrent sessions — never store this on self)
+    ground_context: Any = None          # retrieved scheme text this answer drew on
+    ground_employee_id: Optional[str] = None  # whose stored rows to admit
+    ground_extra: List[Any] = field(default_factory=list)  # counts the path emitted
 
 
 class AuditAssistant:
@@ -164,6 +177,15 @@ class AuditAssistant:
 
     # -- public ----------------------------------------------------------
     def answer(self, question: str, result: Any = None) -> Answer:
+        """Route the question, then *verify* the answer before returning it.
+
+        Verification is the FR-12 hard boundary made checkable: every figure in the
+        reply must trace to a retrieved row, stored record or scheme fact. A failed
+        check annotates the answer (FR-14 — never discards it).
+        """
+        return self._verify(self._route(question, result), result, question)
+
+    def _route(self, question: str, result: Any = None) -> Answer:
         q = (question or "").strip()
         if not q:
             return Answer("Ask me about the scheme, a person's claim, or say "
@@ -218,6 +240,51 @@ class AuditAssistant:
         # narrative / scheme question -> retrieval (+ model if available)
         return self._scheme(q, result)
 
+    # -- groundedness verification (FR-14) --------------------------------
+    def _verify(self, ans: Answer, result: Any, question: str = "") -> Answer:
+        """Measure ``ans.grounded`` and attach a plain-language reason when it fails.
+
+        Runs on *every* path, not just the model one. The structured paths read
+        their figures straight from rows and should always pass — checking them
+        anyway means a future refactor that breaks grounding fails loudly instead
+        of silently shipping an unverified number to an auditor.
+        """
+        allowed = allowed_figures(
+            result,
+            # A figure the user typed is grounded by definition — echoing "your
+            # $25,000 salary" back is not an invention.
+            [ans.ground_context, question],
+            db_conn=self._conn,
+            employee_id=ans.ground_employee_id,
+            config=self.config,
+            extra=ans.ground_extra,
+        )
+        # The cap-then-rate arithmetic is only permitted on the scheme path, where
+        # the prompt invites it ("apply the cap and the support rate to a salary
+        # the user names"). Structured answers quote rows verbatim — no derivation.
+        bases, rates = ((None, None) if ans.mode != "scheme"
+                        else derivation_bases(question, config=self.config))
+        report = check(ans.text, allowed, derive_bases=bases, derive_rates=rates)
+        ans.grounded = report.grounded
+        ans.unsupported_figures = [f"{v:,.2f}" for v in report.unsupported]
+
+        # deterministic paths carry full confidence: the figures ARE the rows.
+        if ans.confidence is None and not ans.used_model:
+            ans.confidence = 1.0
+
+        if not report.grounded:
+            ans.confidence_reason = report.reason
+            ans.text = (ans.text.rstrip() + "\n\n> ⚠️ **Unverified figure.** "
+                        + report.reason)
+        elif (ans.confidence is not None
+              and ans.confidence < self.config.confidence_cutoff):
+            ans.confidence_reason = (
+                f"The model reported {ans.confidence:.0%} confidence, below the "
+                f"{self.config.confidence_cutoff:.0%} review threshold. Every figure "
+                "here does trace to a claim row — but read the answer before acting on it."
+            )
+        return ans
+
     # -- structured paths (grounded, no model needed) --------------------
     def _employee(self, e: Any) -> Answer:
         emp = e.employee
@@ -233,7 +300,7 @@ class AuditAssistant:
             why = "; ".join(e.verdict.reasons) or "see the eligibility checks"
             txt = (f"**{emp.name}** ({emp.id}) {label}. Reason: {why}. "
                    "This person is reported in the claim, not silently dropped.")
-        return Answer(txt, grounded=True, mode="data")
+        return Answer(txt, mode="data", ground_employee_id=emp.id)
 
     def _xc_phrase(self, e: Any) -> str:
         if e.method_b is None:
@@ -269,7 +336,8 @@ class AuditAssistant:
                      ". Each eligibility decision below cites the exact cell.")
         else:
             head += " No source cells were recorded for this person."
-        return Answer(head, citations=uniq, grounded=True, mode="evidence")
+        return Answer(head, citations=uniq, mode="evidence",
+                      ground_employee_id=emp.id)
 
     def _employee_documents(self, emp_id: str, name: Optional[str] = None) -> Optional[Answer]:
         """List a person's document checklist (present + missing) from the store.
@@ -300,7 +368,8 @@ class AuditAssistant:
                      for d in stored]
             head = (f"**{len(stored)}** document(s) on file for **{who}** ({emp_id}): "
                     f"{files}. Ask to download any of them by name.")
-            return Answer(head, citations=cites, grounded=True, mode="evidence")
+            return Answer(head, citations=cites, mode="evidence",
+                          ground_employee_id=emp_id, ground_extra=[len(stored)])
         mn = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
         def lbl(d):
@@ -323,7 +392,9 @@ class AuditAssistant:
             cites += [{"file": d["file"], "sheet": d["sheet"], "cell": None,
                        "label": d["doc_type"] or "document", "doc_id": d["doc_id"]}
                       for d in stored]
-        return Answer(head, citations=cites, grounded=True, mode="evidence")
+        return Answer(head, citations=cites, mode="evidence",
+                      ground_employee_id=emp_id,
+                      ground_extra=[len(present), len(missing), len(stored)])
 
     def _evidence_overview(self, result: Any) -> Answer:
         files = []
@@ -339,14 +410,14 @@ class AuditAssistant:
                "\"fetch the evidence for ANS-001\" — and I'll walk through each eligibility "
                "decision for that person, each linked to the exact document and cell it came "
                f"from. The documents supporting this claim are: {doc_list}.")
-        return Answer(txt, grounded=True, mode="evidence")
+        return Answer(txt, mode="evidence")
 
     def _totals(self, result: Any) -> Answer:
         q = [e for e in result.all_employees if e.qualifies]
         txt = (f"Total claim (EDB Method A): **${result.total_claim_a:,.2f}** across "
                f"**{len(q)}** qualifying staff, at a {result.support_rate:.0%} support rate"
                + ("" if result.support_rate_is_final else " (assumed — non-final)") + ".")
-        return Answer(txt, grounded=True, mode="data")
+        return Answer(txt, mode="data", ground_extra=[len(q)])
 
     def _roster(self, result: Any, ql: str) -> Answer:
         emps = result.all_employees
@@ -362,7 +433,8 @@ class AuditAssistant:
         else:
             txt = (f"**{len(q)} of {len(emps)}** qualify · {len(bl)} blocked · "
                    f"{len(ex)} not eligible. Total claim ${result.total_claim_a:,.2f}.")
-        return Answer(txt, grounded=True, mode="data")
+        return Answer(txt, mode="data",
+                      ground_extra=[len(q), len(emps), len(bl), len(ex)])
 
     # -- scheme / narrative path (RAG) -----------------------------------
     def _scheme(self, question: str, result: Any) -> Answer:
@@ -392,8 +464,12 @@ class AuditAssistant:
             )
             res = self.client.call(prompt, schema=_ANSWER_SCHEMA)
             if res.ok and res.parsed and res.parsed.get("answer"):
-                return Answer(res.parsed["answer"].strip(), grounded=True,
-                              used_model=True, confidence=res.confidence, mode="scheme")
+                # The only path where a figure can be invented — _verify scores it
+                # against `ranked` (the retrieved context) plus the pipeline rows.
+                return Answer(res.parsed["answer"].strip(), used_model=True,
+                              confidence=res.confidence,
+                              confidence_reason=res.confidence_reason,
+                              mode="scheme", ground_context=ranked)
             # model present but failed -> fall through to retrieval text
 
         # offline / fallback: return the best retrieved fact verbatim (grounded).
@@ -402,11 +478,11 @@ class AuditAssistant:
             note = ("" if not offline else
                     "  \n_(Offline mode: showing the relevant scheme information. "
                     "Connect the local model for conversational answers.)_")
-            return Answer(best + note, grounded=True, used_model=False,
-                          offline=offline, mode="scheme")
+            return Answer(best + note, used_model=False,
+                          offline=offline, mode="scheme", ground_context=ranked)
         return Answer("I don't have information on that. Try asking about eligibility, "
                       "how the claim is calculated, the support rate, or the audit/SOE.",
-                      grounded=True, offline=offline, mode="scheme")
+                      offline=offline, mode="scheme")
 
     def _retrieve(self, question: str, top: int = 3):
         qtok = set(_tokens(question))
@@ -523,7 +599,8 @@ class AuditAssistant:
                          ". Each decision below cites the exact cell.")
             else:
                 head += " No source cells were recorded for this person."
-            return Answer(head, citations=cites, grounded=True, mode="evidence")
+            return Answer(head, citations=cites, mode="evidence",
+                          ground_employee_id=emp_id)
 
         if status == "QUALIFIES":
             calc_a = get_calc(conn, emp_id, "A")
@@ -550,4 +627,4 @@ class AuditAssistant:
             why = "; ".join(verdict.get("reasons") or []) or "see the eligibility checks"
             txt = (f"**{name}** ({emp_id}) {label}. Reason: {why}. _(from saved records)_ "
                    "This person is reported in the claim, not silently dropped.")
-        return Answer(txt, grounded=True, mode="data")
+        return Answer(txt, mode="data", ground_employee_id=emp_id)
